@@ -16,11 +16,11 @@
  *
  * 必须以命名导出暴露 apply/inject：Loader 的 unwrapExports 会折叠 `export default`
  * 并静默丢掉 inject，导致插件无声失效。
- * @module @lenovo/dsh-llm-profile
+ * @module @star-12-bytedance/dsh-llm-profile
  */
 import z from '@deepseek-ai/schemastery';
 import { defineTool } from '@deepseek-ai/dsh-tools';
-import { appendFile, mkdir } from 'node:fs/promises';
+import { appendFile, mkdir, readFile, rename, stat, unlink, readdir } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
@@ -29,6 +29,26 @@ const name = 'llm-profile';
 
 /** Hard dependencies: the tool registry this plugin contributes to. */
 const inject = ['tools'];
+
+/** Local-time `YYYY-MM-DD` key, used to decide whether a record falls on today. */
+function localDay(ms) {
+  const d = new Date(ms);
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${d.getFullYear()}-${month}-${day}`;
+}
+
+/**
+ * Format a possibly-missing counter.
+ *
+ * Records read back from disk may predate a field, or omit it when size recording was
+ * off, so rendering must tolerate `undefined` instead of throwing on `.toLocaleString`.
+ * @param value - the counter, or anything non-numeric.
+ * @returns a localized number, or `?` when the value is not a usable number.
+ */
+function num(value) {
+  return typeof value === 'number' && Number.isFinite(value) ? value.toLocaleString() : '?';
+}
 
 /** Deployment configuration, editable from the Settings UI. */
 const Config = z.object({
@@ -39,11 +59,19 @@ const Config = z.object({
   keepInMemory: z
     .number()
     .default(2000)
-    .description('内存中保留的最近调用记录条数上限（按会话聚合后的原始行）。'),
+    .description('内存中保留的最近调用记录条数上限。'),
   recordMessageSizes: z
     .boolean()
     .default(true)
-    .description('是否统计请求大小（消息数/字符数）。关掉可略微降低每次调用的开销。'),
+    .description('是否统计请求大小（消息数/字符数）。关掉可避免每次调用遍历消息列表。'),
+  rotateBytes: z
+    .number()
+    .default(10 * 1024 * 1024)
+    .description('calls.jsonl 超过该字节数时轮转归档，避免无限增长。0 表示不轮转。'),
+  keepArchives: z
+    .number()
+    .default(5)
+    .description('最多保留多少个轮转归档文件，超出的从最旧的开始删除。'),
 });
 
 /** One recorded model call, with only sizes retained (never message content). */
@@ -106,11 +134,127 @@ function apply(ctx, config) {
   const persist = config.persist ?? true;
   const keepInMemory = config.keepInMemory ?? 2000;
   const recordSizes = config.recordMessageSizes ?? true;
+  const rotateBytes = config.rotateBytes ?? 10 * 1024 * 1024;
+  const keepArchives = config.keepArchives ?? 5;
 
-  /** @type {CallRecord[]} */
-  const calls = [];
   const dir = join(homedir(), '.dsh', 'llm-profile');
+  const logPath = join(dir, 'calls.jsonl');
+  const archivePrefix = 'calls-';
   let dirReady = false;
+
+  // Bounded ring buffer. Never `splice`: that is O(n) per call, and this sits on
+  // the hot path of every model call. Written slots hold records; unread ones stay
+  // null, and `buffered` bounds the traversal.
+  /** @type {(CallRecord|null)[]} */
+  const ring = new Array(Math.max(1, keepInMemory)).fill(null);
+  let ringCursor = 0;
+  let buffered = 0;
+  /** If the process wrote more records than the ring holds, the oldest are gone. */
+  let evicted = 0;
+
+  /** Oldest-first snapshot of the in-memory records. */
+  function bufferedRecords() {
+    const out = [];
+    if (buffered < ring.length) {
+      for (let i = 0; i < buffered; i++) out.push(ring[i]);
+      return out;
+    }
+    for (let i = 0; i < ring.length; i++) out.push(ring[(ringCursor + i) % ring.length]);
+    return out;
+  }
+
+  /**
+   * Historical records read back from disk.
+   *
+   * Read once and cached; a later call re-reads only the bytes appended since, so
+   * the cost is proportional to new data rather than to the whole log. This is what
+   * lets the tool answer "where did this week's tokens go" across restarts, which an
+   * in-memory-only counter cannot.
+   */
+  /** @type {CallRecord[]} */
+  let history = [];
+  let historyLoaded = false;
+  let historyBytes = 0;
+  let historyDay = null;
+
+  function parseLines(text) {
+    const out = [];
+    for (const line of text.split('\n')) {
+      if (line === '') continue;
+      try {
+        const record = JSON.parse(line);
+        if (record !== null && typeof record === 'object' && typeof record.at === 'number') out.push(record);
+      } catch {
+        // A torn final line (crash mid-append) is expected; skip it.
+      }
+    }
+    return out;
+  }
+
+  /** Drop history older than today plus the previous day, so memory stays bounded. */
+  function trimHistory() {
+    if (history.length === 0) return;
+    const today = localDay(Date.now());
+    const yesterday = localDay(Date.now() - 86_400_000);
+    if (historyDay === today && history.length > 0) {
+      const firstKept = history.findIndex((r) => {
+        const d = localDay(r.at);
+        return d === today || d === yesterday;
+      });
+      // -1 means every record is older than the window.
+      history = firstKept === -1 ? [] : history.slice(firstKept);
+      historyDay = today;
+    }
+  }
+
+  /** Append newly written bytes to the cached history. Best-effort: never throws. */
+  async function loadHistory() {
+    try {
+      const info = await stat(logPath);
+      if (info.size < historyBytes) {
+        // The log was rotated or truncated under us: start over from empty.
+        history = [];
+        historyBytes = 0;
+      }
+      if (info.size === historyBytes) return;
+      const text = await readFile(logPath, 'utf8');
+      // Parse only the portion we have not read yet; keep the trailing partial
+      // line unparsed so a concurrent append is not misread as corrupt.
+      const fresh = text.slice(historyBytes);
+      const lastNewline = fresh.lastIndexOf('\n');
+      if (lastNewline >= 0) {
+        history.push(...parseLines(fresh.slice(0, lastNewline)));
+        historyBytes += lastNewline + 1;
+      }
+      historyLoaded = true;
+      trimHistory();
+      if (historyDay === null) historyDay = localDay(Date.now());
+    } catch {
+      // Missing log (nothing persisted yet) or an unreadable one: history stays as is.
+      historyLoaded = true;
+    }
+  }
+
+  /** Rotate the log once it exceeds `rotateBytes`, keeping the newest archives. */
+  async function rotateIfNeeded() {
+    if (rotateBytes <= 0) return;
+    try {
+      const info = await stat(logPath);
+      if (info.size < rotateBytes) return;
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+      await rename(logPath, join(dir, `${archivePrefix}${stamp}.jsonl`));
+      history = [];
+      historyBytes = 0;
+      const archives = (await readdir(dir))
+        .filter((f) => f.startsWith(archivePrefix) && f.endsWith('.jsonl'))
+        .sort();
+      for (const stale of archives.slice(0, Math.max(0, archives.length - keepArchives))) {
+        await unlink(join(dir, stale));
+      }
+    } catch {
+      // Rotation is housekeeping; a failure must not affect the observation path.
+    }
+  }
 
   /** Append one record to the observation log; failures are never allowed to surface. */
   const persistRecord = (record) => {
@@ -121,7 +265,8 @@ function apply(ctx, config) {
           await mkdir(dir, { recursive: true });
           dirReady = true;
         }
-        await appendFile(join(dir, 'calls.jsonl'), JSON.stringify(record) + '\n', 'utf8');
+        await rotateIfNeeded();
+        await appendFile(logPath, JSON.stringify(record) + '\n', 'utf8');
       } catch {
         // Observability must never break the call path it observes.
       }
@@ -181,8 +326,11 @@ function apply(ctx, config) {
             toolCalls,
             finish,
           };
-          calls.push(record);
-          if (calls.length > keepInMemory) calls.splice(0, calls.length - keepInMemory);
+          // O(1) insert; the oldest slot is overwritten once the ring is full.
+          if (buffered === ring.length) evicted += 1;
+          ring[ringCursor] = record;
+          ringCursor = (ringCursor + 1) % ring.length;
+          if (buffered < ring.length) buffered += 1;
           persistRecord(record);
         }
       };
@@ -217,7 +365,17 @@ function apply(ctx, config) {
         },
         sinceMinutes: {
           type: 'number',
-          description: '只看最近 N 分钟内的调用。留空为本次进程启动以来的全部。',
+          description: '只看最近 N 分钟内的调用。留空为全部。',
+        },
+        scope: {
+          type: 'string',
+          enum: ['session', 'today', 'all'],
+          description:
+            '统计范围。session=仅本次进程（默认）；today=本次进程 + 今天已落盘的历史；all=本次进程 + 所有仍可读的历史记录。跨天或跨重启的问题要用 today/all。',
+        },
+        sessionId: {
+          type: 'string',
+          description: '只统计某个 DSH 会话的调用。留空为全部会话。',
         },
       },
       output: {
@@ -237,6 +395,18 @@ function apply(ctx, config) {
                 reasoningTokens: { type: 'integer', required: true },
                 cacheHitPct: { type: 'number', required: true },
                 ms: { type: 'integer', required: true },
+              },
+            },
+            coverage: {
+              type: 'object',
+              additionalProperties: false,
+              required: true,
+              properties: {
+                scope: { type: 'string', required: true },
+                inMemory: { type: 'integer', required: true },
+                persistedRows: { type: 'integer', required: true },
+                evictedFromMemory: { type: 'integer', required: true },
+                note: { type: 'string', required: true },
               },
             },
             byPurpose: {
@@ -313,36 +483,57 @@ function apply(ctx, config) {
             return [
               {
                 type: 'text',
-                text: '本次进程内还没有观察到模型调用。若刚装好插件，先进行一轮对话再查询。',
+                text:
+                  `范围内没有观察到模型调用（scope=${value.coverage.scope}）。\n` +
+                  `${value.coverage.note}`,
               },
             ];
           }
-          lines.push(`模型调用 ${t.calls} 次 · 输入 ${t.inputTokens.toLocaleString()} · 输出 ${t.outputTokens.toLocaleString()}`);
           lines.push(
-            `cache 命中率 ${t.cacheHitPct.toFixed(1)}%（复用 ${t.cacheReadTokens.toLocaleString()} / 新增 ${t.inputTokens.toLocaleString()}） · 推理 ${t.reasoningTokens.toLocaleString()} · 耗时 ${(t.ms / 1000).toFixed(1)}s`,
+            `范围 ${value.coverage.scope}（内存 ${value.coverage.inMemory} 条 + 磁盘 ${value.coverage.persistedRows} 条）`,
+          );
+          lines.push(`模型调用 ${num(t.calls)} 次 · 输入 ${num(t.inputTokens)} · 输出 ${num(t.outputTokens)}`);
+          const hitPct = typeof t.cacheHitPct === 'number' ? t.cacheHitPct.toFixed(1) : '0.0';
+          const seconds = (typeof t.ms === 'number' ? t.ms / 1000 : 0).toFixed(1);
+          lines.push(
+            `cache 命中率 ${hitPct}%（复用 ${num(t.cacheReadTokens)} / 新增 ${num(t.inputTokens)}） · 推理 ${num(t.reasoningTokens)} · 耗时 ${seconds}s`,
           );
           if (value.byPurpose.length > 1) {
             lines.push('按用途：');
             for (const p of value.byPurpose) {
-              lines.push(`  ${p.purpose}: ${p.calls} 次 · 输入 ${p.inputTokens.toLocaleString()} · 输出 ${p.outputTokens.toLocaleString()}`);
+              lines.push(`  ${p.purpose}: ${num(p.calls)} 次 · 输入 ${num(p.inputTokens)} · 输出 ${num(p.outputTokens)}`);
             }
           }
           if (value.byModel.length > 1) {
             lines.push('按模型：');
             for (const m of value.byModel) {
-              lines.push(`  ${m.model}: ${m.calls} 次 · 输入 ${m.inputTokens.toLocaleString()} · 输出 ${m.outputTokens.toLocaleString()}`);
+              lines.push(`  ${m.model}: ${num(m.calls)} 次 · 输入 ${num(m.inputTokens)} · 输出 ${num(m.outputTokens)}`);
             }
           }
           lines.push(`最贵的 ${value.top.length} 次调用：`);
           for (const c of value.top) {
+            // Historical rows can predate a field (or omit it when recordMessageSizes
+            // was off), so every optional metric gets a fallback: a missing counter
+            // must not turn the whole report into a TypeError.
+            const ctxParts = [];
+            if (typeof c.messages === 'number') ctxParts.push(`${c.messages} 条`);
+            if (typeof c.chars === 'number') ctxParts.push(`${c.chars.toLocaleString()} 字符`);
+            if (typeof c.tools === 'number') ctxParts.push(`${c.tools} 工具`);
             lines.push(
-              `  ${c.at} ${c.model} [${c.purpose}] in ${c.inputTokens.toLocaleString()} / out ${c.outputTokens.toLocaleString()} · cache ${c.cacheReadTokens.toLocaleString()} · 上下文 ${c.messages} 条 ${c.chars.toLocaleString()} 字符 · ${c.tools} 工具 · ${(c.ms / 1000).toFixed(1)}s · ${c.finish}`,
+              `  ${c.at} ${c.model} [${c.purpose}] in ${num(c.inputTokens)} / out ${num(c.outputTokens)}` +
+                ` · cache ${num(c.cacheReadTokens)}` +
+                (ctxParts.length > 0 ? ` · 上下文 ${ctxParts.join(' ')}` : '') +
+                ` · ${(num(c.ms) / 1000).toFixed(1)}s · ${c.finish ?? 'unknown'}`,
             );
           }
           if (value.intervalGrowth !== undefined && value.intervalGrowth.length > 1) {
             lines.push('上下文增长（main 调用，按时间）：');
             for (const g of value.intervalGrowth) {
-              lines.push(`  ${g.at} ${g.messages} 条 ${g.chars.toLocaleString()} 字符 → in ${g.inputTokens.toLocaleString()} (cache ${g.cacheReadTokens.toLocaleString()})`);
+              const size = typeof g.chars === 'number' ? `${g.chars.toLocaleString()} 字符` : '字符数未知';
+              const count = typeof g.messages === 'number' ? `${g.messages} 条` : '条数未知';
+              lines.push(
+                `  ${g.at} ${count} ${size} → in ${num(g.inputTokens)} (cache ${num(g.cacheReadTokens)})`,
+              );
             }
           }
           return [{ type: 'text', text: lines.join('\n') }];
@@ -355,11 +546,38 @@ function apply(ctx, config) {
             : 0;
         const wantPurpose = typeof args.purpose === 'string' ? args.purpose : 'all';
         const wantProvider = typeof args.provider === 'string' ? args.provider : '';
+        const scope = typeof args.scope === 'string' ? args.scope : 'session';
 
-        const rows = calls.filter((call) => {
+        // session = this process only (what the ring holds).
+        // today   = ring merged with today's persisted rows.
+        // all     = ring merged with every persisted row still readable.
+        const merged = [...bufferedRecords()];
+        let historyUsed = false;
+        let historyRows = 0;
+        if (scope !== 'session' && persist) {
+          await loadHistory();
+          historyUsed = true;
+          const todayKey = localDay(Date.now());
+          for (const row of history) {
+            if (scope === 'today' && localDay(row.at) !== todayKey) continue;
+            merged.push(row);
+            historyRows += 1;
+          }
+        }
+
+        const wantSession = typeof args.sessionId === 'string' && args.sessionId !== '' ? args.sessionId : '';
+
+        // The ring may contain a row the log also has (written this process); de-duplicate
+        // so `today`/`all` do not double count the same call.
+        const seen = new Set();
+        const rows = merged.filter((call) => {
+          const key = `${call.at}\u0000${call.sessionId}\u0000${call.model}\u0000${call.inputTokens}\u0000${call.outputTokens}`;
+          if (seen.has(key)) return false;
+          seen.add(key);
           if (cutoff !== 0 && call.at < cutoff) return false;
           if (wantPurpose !== 'all' && call.purpose !== wantPurpose) return false;
           if (wantProvider !== '' && call.provider !== wantProvider) return false;
+          if (wantSession !== '' && call.sessionId !== wantSession) return false;
           return true;
         });
 
@@ -397,6 +615,18 @@ function apply(ctx, config) {
             // the prompt served from cache, i.e. the cache hit rate.
             cacheHitPct: totalInput + totalCache === 0 ? 0 : (totalCache / (totalInput + totalCache)) * 100,
             ms: sum(rows, 'ms'),
+          },
+          coverage: {
+            scope,
+            inMemory: buffered,
+            persistedRows: historyRows,
+            evictedFromMemory: evicted,
+            note:
+              scope === 'session'
+                ? '仅统计本次进程内的调用；用 scope=today 或 all 可以看到跨天/跨重启的历史。'
+                : historyUsed
+                  ? `已合入磁盘历史（${historyRows} 条）；写入失败或超出归档保留期的记录不在其中。`
+                  : 'persist 已关闭，只能统计本次进程内的调用。',
           },
           byPurpose: group('purpose'),
           byModel: group('model'),
