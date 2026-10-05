@@ -55,7 +55,7 @@ cache 命中率 99.6%（复用 208,000 / 新增 814） · 推理 0 · 耗时 3.8
 ## 安装
 
 ```bash
-dsh plugin --profile <你的profile> add @xinghe-source/dsh-llm-profile
+dsh plugin --profile <你的profile> add @star-12-bytedance/dsh-llm-profile
 ```
 
 或从本地目录安装（开发用）：
@@ -115,7 +115,7 @@ dsh --profile <你的profile>
 ## 开发
 
 ```bash
-git clone https://github.com/Xinghe-Source/dsh-llm-profile.git
+git clone https://github.com/star-12-Bytedance/dsh-llm-profile.git
 cd dsh-llm-profile
 npm run check        # 校验插件契约与装配
 npm run pack:check   # 检查将要发布的文件清单
@@ -130,4 +130,4 @@ npm run pack:check   # 检查将要发布的文件清单
 
 ## License
 
-[MIT](LICENSE) © 2026 Xinghe-Source
+[MIT](LICENSE) © 2026 star-12-Bytedance

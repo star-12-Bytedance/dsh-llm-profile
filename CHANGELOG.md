@@ -20,5 +20,5 @@
 - 仅追加 JSONL 落盘到 `~/.dsh/llm-profile/calls.jsonl`，不写工作区。
 - `scripts/check.mjs` 契约自检，覆盖四个静默失败点。
 
-[Unreleased]: https://github.com/Xinghe-Source/dsh-llm-profile/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/Xinghe-Source/dsh-llm-profile/releases/tag/v0.1.0
+[Unreleased]: https://github.com/star-12-Bytedance/dsh-llm-profile/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/star-12-Bytedance/dsh-llm-profile/releases/tag/v0.1.0

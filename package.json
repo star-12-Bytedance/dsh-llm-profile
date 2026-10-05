@@ -1,12 +1,12 @@
 {
-  "name": "@xinghe-source/dsh-llm-profile",
+  "name": "@star-12-bytedance/dsh-llm-profile",
   "version": "0.1.0",
   "description": "Per-call LLM token attribution for DeepSeek Harness (DSH): context size, cache-hit rate, internal-call overhead, and the most expensive calls. Answers \"which step burned the tokens\" — the question a total-cost meter cannot.",
   "license": "MIT",
   "author": {
-    "name": "Xinghe-Source",
+    "name": "star-12-Bytedance",
     "email": "niu071112@qq.com",
-    "url": "https://github.com/Xinghe-Source"
+    "url": "https://github.com/star-12-Bytedance"
   },
   "type": "module",
   "main": "index.js",
@@ -44,11 +44,11 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Xinghe-Source/dsh-llm-profile.git"
+    "url": "git+https://github.com/star-12-Bytedance/dsh-llm-profile.git"
   },
-  "homepage": "https://github.com/Xinghe-Source/dsh-llm-profile#readme",
+  "homepage": "https://github.com/star-12-Bytedance/dsh-llm-profile#readme",
   "bugs": {
-    "url": "https://github.com/Xinghe-Source/dsh-llm-profile/issues"
+    "url": "https://github.com/star-12-Bytedance/dsh-llm-profile/issues"
   },
   "engines": {
     "node": ">=20"
