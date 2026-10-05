@@ -158,5 +158,25 @@ r4.totals.calls === 1 ? ok('坏行与半行被跳过，读到 1 条好记录') :
 const rendered = d.state.tool.output.render({}, r4);
 rendered[0]?.text?.length > 0 ? ok('缺字段的记录渲染不抛错') : bad('渲染失败');
 
+// ---- 6. 渲染输出必须是可读数字，不能出现 NaN ----
+// 这条断言来自一个真实回归：渲染时把「显示用」的千分位字符串拿去做除法，
+// 输出的耗时变成了 "NaNs"。契约检查只看返回值，抓不到渲染层的这类错误。
+console.log('\n渲染输出不含 NaN');
+const e = makeCtx();
+mod.apply(e.ctx, config);
+for (const n of [1, 2]) {
+  await simulateCall(e.state, { sessionId: 'sess-E', inputTokens: 1234 * n, outputTokens: 56 * n, cacheRead: 789 * n });
+}
+await settle();
+const r5 = await e.state.tool.execute({ scope: 'today' });
+const text5 = e.state.tool.output.render({}, r5)[0].text;
+text5.includes('NaN')
+  ? bad(`渲染输出含 NaN：\n${text5.split('\n').filter((l) => l.includes('NaN')).join('\n')}`)
+  : ok('渲染输出不含 NaN');
+/耗时 \d+\.\d+s/.test(text5) ? ok('汇总行耗时是数字') : bad('汇总行耗时不是数字');
+/\d+\.\d+s · /.test(text5) || r5.top.length === 0
+  ? ok('最贵调用行耗时是数字')
+  : bad('最贵调用行耗时不是数字');
+
 console.log(failures === 0 ? '\n结果：全部通过' : `\n结果：${failures} 项失败`);
 process.exit(failures === 0 ? 0 : 1);

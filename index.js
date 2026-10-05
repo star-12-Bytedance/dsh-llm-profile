@@ -519,11 +519,14 @@ function apply(ctx, config) {
             if (typeof c.messages === 'number') ctxParts.push(`${c.messages} 条`);
             if (typeof c.chars === 'number') ctxParts.push(`${c.chars.toLocaleString()} 字符`);
             if (typeof c.tools === 'number') ctxParts.push(`${c.tools} 工具`);
+            // Divide the RAW number: num() returns a display string with thousands
+            // separators, and arithmetic on it yields NaN.
+            const callSeconds = typeof c.ms === 'number' ? (c.ms / 1000).toFixed(1) : '?';
             lines.push(
               `  ${c.at} ${c.model} [${c.purpose}] in ${num(c.inputTokens)} / out ${num(c.outputTokens)}` +
                 ` · cache ${num(c.cacheReadTokens)}` +
                 (ctxParts.length > 0 ? ` · 上下文 ${ctxParts.join(' ')}` : '') +
-                ` · ${(num(c.ms) / 1000).toFixed(1)}s · ${c.finish ?? 'unknown'}`,
+                ` · ${callSeconds}s · ${c.finish ?? 'unknown'}`,
             );
           }
           if (value.intervalGrowth !== undefined && value.intervalGrowth.length > 1) {
