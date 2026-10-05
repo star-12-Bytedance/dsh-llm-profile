@@ -1,0 +1,73 @@
+{
+  "name": "@xinghe-source/dsh-llm-profile",
+  "version": "0.1.0",
+  "description": "Per-call LLM token attribution for DeepSeek Harness (DSH): context size, cache-hit rate, internal-call overhead, and the most expensive calls. Answers \"which step burned the tokens\" — the question a total-cost meter cannot.",
+  "license": "MIT",
+  "author": {
+    "name": "Xinghe-Source",
+    "email": "niu071112@qq.com",
+    "url": "https://github.com/Xinghe-Source"
+  },
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": {
+      "default": "./index.js"
+    },
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "cordis",
+    "llm",
+    "token",
+    "observability",
+    "profiler",
+    "cost",
+    "cache",
+    "deepseek",
+    "ai-agents",
+    "token-usage",
+    "cache-hit-rate",
+    "llm-observability",
+    "插件",
+    "token统计",
+    "可观测性"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Xinghe-Source/dsh-llm-profile.git"
+  },
+  "homepage": "https://github.com/Xinghe-Source/dsh-llm-profile#readme",
+  "bugs": {
+    "url": "https://github.com/Xinghe-Source/dsh-llm-profile/issues"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "*",
+    "@deepseek-ai/dsh-tools": "*",
+    "@deepseek-ai/schemastery": "*"
+  },
+  "scripts": {
+    "check": "node scripts/check.mjs",
+    "pack:check": "npm pack --dry-run"
+  }
+}

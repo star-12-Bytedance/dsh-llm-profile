@@ -1,0 +1,20 @@
+# 依赖与构建产物
+node_modules/
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# 打包产物
+*.tgz
+dist/
+build/
+
+# 运行时观测数据（本插件产生在 ~/.dsh/llm-profile/，不要提交）
+calls.jsonl
+
+# 编辑器与系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini

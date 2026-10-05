@@ -1,0 +1,10 @@
+# @lenovo/dsh-llm-profile 挂载补丁（bundle patch，insert 语义）
+# 作为 dsh.profile.bundles 层在 profile 上做一次 insert；后到的 bundle 层与用户
+# cordis.patch.yml 按行 id 覆盖。config 保持静态字面量（Loader 表达式求值约束）。
+- insert:
+    - id: llm-profile
+      name: '@lenovo/dsh-llm-profile'
+      config:
+        persist: true
+        keepInMemory: 2000
+        recordMessageSizes: true
